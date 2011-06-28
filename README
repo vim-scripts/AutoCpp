@@ -1,0 +1,17 @@
+This is a mirror of http://www.vim.org/scripts/script.php?script_id=3648
+
+USAGE
+
+Type something like
+    it = myMap.find(3);
+then hit <C-J> (Ctrl + J). If declaration of myMap is availible inside
+current function, AutoCpp will insert typename of iterator (for now
+AutoCpp only supports const_iterator).
+
+If myMap is declared in that way
+    std::map<int, std::string> myMap;
+line with iterator turns into
+    std::map<int, std::string>::const_iterator it = myMap.find(3);
+
+To get an idea how it works, you can watch a short video:
+http://www.youtube.com/watch?v=uTqnQEuUSL4
