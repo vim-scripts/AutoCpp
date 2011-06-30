@@ -5,10 +5,12 @@
 " ========================================================================
 " Author:  Dmitry Ermolov <epdmitry@yandex.ru>
 " License: This program is free software. It comes without any warranty,
-"          to the extent permitted by applocable law. You can redistribute
-"          it and/or modify it under the terms of the Do What THe Fuck You 
+"          to the extent permitted by applicable law. You can redistribute
+"          it and/or modify it under the terms of the Do What The Fuck You 
 "          Want To Public License, Version 2, as published by Sam Hocevar.
 "          See http://sam.zoy.org/wtfpl/COPYING for more details.
+" 
+" https://github.com/9uMaH/autocpp
 " ========================================================================
 
 if exists('s:plugin_loaded') || version < 700
@@ -20,12 +22,16 @@ let s:plugin_loaded = 1
 " Keybindings
 """""""""""""
 
+" Typify
 map <silent> <C-j> :AutoCppTypify<CR>
 imap <silent> <C-j> <C-O>:AutoCppTypify<CR>
 
-"""""""""""
+" Print variable type
+map <silent> <C-n> :AutoCppPrintVariableType<CR>
+
+"""""""""""""
 " Commands
-"""""""""""
+"""""""""""""
 
 command -nargs=0 AutoCppGotoFunctionBegin call s:GotoFunctionBegin()
 command -nargs=0 AutoCppPrintFunctionName call s:PrintFunctionName()
@@ -34,7 +40,11 @@ command -nargs=0 AutoCppGotoVariableDeclaration call s:GotoVariableDeclaration()
 command -nargs=0 AutoCppPrintVariableType call s:PrintVariableType()
 command -nargs=0 AutoCppTypify call s:Typify()
 
-let s:KEYWORDS = {'const' : 1, 'do' : 1, 'except' : 1, 'for' : 1, 'if' : 1, 'struct' : 1, 'switch' : 1, 'try' : 1, 'union' : 1, 'while' : 1}
+"""""""""""""
+" Constants
+"""""""""""""
+
+let s:KEYWORDS = {'const' : 1, 'do' : 1, 'except' : 1, 'for' : 1, 'if' : 1, 'struct' : 1, 'switch' : 1, 'try' : 1, 'union' : 1, 'while' : 1, 'return' : 1}
 
 " Exceptions, that are used in this module
 "   'parse error' -- cannot parse code
@@ -46,10 +56,11 @@ let s:ERRORS = {}
 let s:ERRORS['not inside function'] = 'Error: cursor is not inside function'
 
 let s:NAME_RE = '[A-Za-z_]\w*'
+let s:TYPENAME_SUFFIX_LIST = ['::const_iterator', '::iterator']
 
-let s:last_typifization_pos = []
-let s:last_typifization_suggest = [] " list of dicts {line, pos_in_line}
-let s:last_typifization_index = []
+let s:type_suggest = [] " list of dicts {line, pos}
+let s:type_suggest_index = 0
+
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Interface functions.
@@ -120,21 +131,44 @@ endfunction
 
 " inserts type of left part in first assignment in the string
 function s:Typify()
+    if s:nothing_changed_since_last_typifization()
+        let suggest_len = len(s:type_suggest)
+        let s:type_suggest_index = (s:type_suggest_index + 1) % suggest_len
+
+        let newline = s:type_suggest[s:type_suggest_index].line
+        let newpos = s:type_suggest[s:type_suggest_index].pos
+
+        call setline(newpos[1], newline)
+        call setpos('.', newpos)
+        return
+    endif
+
     try
         let typifizationinfo = s:typify_current_assignment()
-        let pos = typifizationinfo.typepos
-        let curline = getline(pos[1])
-        let linebeg = strpart(curline, 0, pos[2]-1)
-        let lineend = strpart(curline, pos[2]-1)
-        let typename = typifizationinfo.typename . ' '
-        let newline = linebeg . typename . lineend
-        call setline(pos[1], newline)
+        let typepos = typifizationinfo.typepos
+        let curline = getline(typepos[1])
+        let linebeg = strpart(curline, 0, typepos[2]-1)
+        let lineend = strpart(curline, typepos[2]-1)
+        let typename_list = typifizationinfo.typename_list
+        let curpos = getpos('.')
 
-        let pos = getpos('.')
-        let pos[2] += strlen(typename)
-        call setpos('.', pos)
+        let s:type_suggest = [s:newsuggest(getline('.'), getpos('.'))]
+        let s:type_suggest_index = 0
+
+        for typename in typename_list
+            let typename = typename . ' '
+            let suggestline = linebeg . typename . lineend
+            let suggestpos = curpos[:]
+            if s:cmppos(curpos, typepos) > 0
+                let suggestpos[2] += strlen(typename)
+            endif
+            call add(s:type_suggest, s:newsuggest(suggestline, suggestpos))
+        endfor
+        call s:Typify()
     catch /^parse error$/
-        echo "Error: can't find untypified assignment on current line"
+        echom "Error: can't find untypified assignment on current line"
+    catch /^not found$/
+        echom "Error: can't find declaration"
     endtry
 endfunction
 
@@ -222,7 +256,7 @@ endfunction
 "
 " Return dictionary
 "   typepos -- position where typename should be inserted
-"   typename -- name of the type of the left part of assignment
+"   typename_list -- list of possible types of the left part of assignment
 function s:typify_current_assignment()
     let original_pos = getpos('.')
     try
@@ -256,10 +290,13 @@ function s:typify_current_assignment()
         endif
 
         let varinfo = s:find_declaration(object_name)
-        let typename = varinfo.basetype . '::const_iterator'
-
+        let typename_list = []
+        for typename in s:TYPENAME_SUFFIX_LIST
+            let tmp = varinfo.basetype . typename
+            call add(typename_list, tmp)
+        endfor
         " understand type
-        return {'typepos': pos, 'typename': typename}
+        return {'typepos': pos, 'typename_list':typename_list}
     finally
         call setpos('.', original_pos)
     endtry
@@ -424,7 +461,7 @@ function s:parse_function_declaration()
     return l:res
 endfunction
 
-" sets cursor to the next token
+" sets cursor to the next token backward
 function s:token_backward()
     let found = search('\S\s*', 'bW')
     if found < 0
@@ -432,12 +469,14 @@ function s:token_backward()
     endif
 endfunction
 
+" set cursor to the next token forward
 function s:token_forward()
     let found = search('\s*\S', 'We')
     if found < 0
         throw 'end of file'
     endif
 endfunction
+
 
 function s:skip_spaces()
     let found = search('\S\s*', 'cbW')
@@ -837,8 +876,31 @@ endfunction
 " Help functions.
 """"""""""""""""""""""""""""""""""""""""""""""""
 
+" returns 0 if position of cursor is changed since last typifization
+"           or if line under cursor is changed
+" returns 1 otherwise
+function s:nothing_changed_since_last_typifization()
+    if len(s:type_suggest) <= s:type_suggest_index
+        return 0
+    end
+
+    let last_suggest = s:type_suggest[s:type_suggest_index]
+    let curpos = getpos('.')
+    let curline = getline('.')
+    if curpos == last_suggest.pos && curline == last_suggest.line
+        return 1
+    else
+        return 0
+    endif
+endfunction
+
+function s:newsuggest(line, pos)
+    return {'line':a:line, 'pos':a:pos}
+endfunction
+
 " returns a text between 2 cursor positions,
 " lines are joined with optional argument separator.
+" default separator is ' '
 function s:text_between(pos1, pos2, ...)
     if a:0 == 0
         let separator = ' '
@@ -889,8 +951,8 @@ endfunction
 
 function s:normalize(text)
     let text = a:text
-    let text = substitute(text, '\s\+\(\W\)', '\1', 'g')
-    let text = substitute(text, '\(\W\)\s\+', '\1', 'g')
+    let text = substitute(text, '\s\+\(\W\)', ' \1', 'g')
+    let text = substitute(text, '\(\W\)\s\+', '\1 ', 'g')
     let text = substitute(text, '\s\+$)', '', 'g')
     let text = substitute(text, '^\s\+', '', 'g')
     let text = substitute(text, '>>', '> >', 'g')
